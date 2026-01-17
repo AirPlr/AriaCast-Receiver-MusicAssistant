@@ -180,6 +180,10 @@ class AriaCastReceiverProvider(PluginProvider):
         self.metadata_handler = MetadataHandler()
         self.metadata_clients: list[web.WebSocketResponse] = []  # Track metadata WebSocket clients
         
+        # Artwork storage (like AirPlay)
+        self._artwork_bytes: bytes | None = None
+        self._artwork_timestamp: int = 0
+        
         # Source details
         self._source_details = PluginSource(
             id=self.instance_id,
@@ -425,9 +429,9 @@ class AriaCastReceiverProvider(PluginProvider):
             await ws.send_json(handshake)
         except:
             pass
-        
-        prebuffer = 25  # 500ms before starting playback
-        
+
+        prebuffer = 25  # 25 frames minimal prebuffer (almost instant)
+
         try:
             async for msg in ws:
                 if msg.type == web.WSMsgType.BINARY:
@@ -576,11 +580,19 @@ class AriaCastReceiverProvider(PluginProvider):
         - title: Track title
         - artist: Artist name
         - album: Album name
-        - artwork_url: Album artwork URL
+        - artwork_url: Album artwork URL (will be downloaded and proxied)
         - duration_ms: Track duration in milliseconds
         - position_ms: Current playback position in milliseconds
         - is_playing: Playback state
         """
+        # Debug: Log all received metadata fields
+        self.logger.debug("Received metadata fields: %s", list(metadata.keys()))
+        artwork_url = metadata.get("artwork_url") or metadata.get("artworkUrl")
+        if artwork_url:
+            self.logger.info("Artwork URL found: %s", artwork_url)
+        else:
+            self.logger.debug("No artwork URL in metadata (checked both 'artwork_url' and 'artworkUrl')")
+        
         if self._source_details.metadata is None:
             ariacast_name = cast("str", self.config.get_value(CONF_ARIACAST_NAME)) or self.name
             self._source_details.metadata = StreamMetadata(title=f"AriaCast | {ariacast_name}")
@@ -600,23 +612,12 @@ class AriaCastReceiverProvider(PluginProvider):
             self._source_details.metadata.album = metadata["album"]
             self.logger.debug("Updated album: %s", metadata["album"])
 
-        # Update artwork/album image
-        if "artwork_url" in metadata and metadata["artwork_url"]:
-            artwork_url = metadata["artwork_url"]
-            # Create MediaItemImage for the artwork
-            if not hasattr(self._source_details.metadata, 'images') or self._source_details.metadata.images is None:
-                self._source_details.metadata.images = []
-            
-            # Clear existing images and add new one
-            self._source_details.metadata.images = [
-                MediaItemImage(
-                    type=ImageType.THUMB,
-                    path=artwork_url,
-                    provider=self.instance_id,
-                    remotely_accessible=True,
-                )
-            ]
-            self.logger.info("Updated artwork: %s", artwork_url)
+        # Update artwork - download and store like AirPlay does
+        # Handle both artwork_url (snake_case) and artworkUrl (camelCase)
+        artwork_url = metadata.get("artwork_url") or metadata.get("artworkUrl")
+        if artwork_url:
+            # Schedule download in background
+            self.mass.create_task(self._download_artwork(artwork_url))
 
         # Update duration
         if "duration_ms" in metadata and metadata["duration_ms"]:
@@ -638,6 +639,59 @@ class AriaCastReceiverProvider(PluginProvider):
         # Trigger update on connected player
         if self._source_details.in_use_by:
             self.mass.players.trigger_player_update(self._source_details.in_use_by)
+
+    async def _download_artwork(self, artwork_url: str) -> None:
+        """Download artwork from URL and update metadata with proxy URL.
+        
+        Args:
+            artwork_url: URL of the artwork image to download
+        """
+        try:
+            self.logger.debug("Downloading artwork from: %s", artwork_url)
+            
+            # Download the image
+            async with self.mass.http_session.get(artwork_url, timeout=10) as response:
+                if response.status == 200:
+                    self._artwork_bytes = await response.read()
+                    self._artwork_timestamp = int(time.time() * 1000)
+                    
+                    # Create proxy URL using Music Assistant's image system
+                    image = MediaItemImage(
+                        type=ImageType.THUMB,
+                        path="artwork",  # Path identifier for resolve_image()
+                        provider=self.instance_id,
+                        remotely_accessible=False,
+                    )
+                    base_url = self.mass.metadata.get_image_url(image)
+                    # Add timestamp for cache-busting
+                    self._source_details.metadata.image_url = f"{base_url}&t={self._artwork_timestamp}"
+                    
+                    self.logger.info("Artwork downloaded and set (%d bytes)", len(self._artwork_bytes))
+                    
+                    # Trigger player update to show new artwork
+                    if self._source_details.in_use_by:
+                        self.mass.players.trigger_player_update(self._source_details.in_use_by)
+                else:
+                    self.logger.warning("Failed to download artwork: HTTP %d", response.status)
+                    
+        except Exception as e:
+            self.logger.warning("Error downloading artwork from %s: %s", artwork_url, e)
+
+    async def resolve_image(self, path: str) -> bytes:
+        """Resolve an image from an image path.
+
+        This returns raw bytes of the artwork image downloaded from the AriaCast client.
+
+        Args:
+            path: The image path (should be "artwork" for AriaCast cover art).
+            
+        Returns:
+            Raw image bytes, or empty bytes if no artwork is available.
+        """
+        if path == "artwork" and self._artwork_bytes:
+            return self._artwork_bytes
+        # Return empty bytes if no artwork is available
+        return b""
 
     async def get_audio_stream(self, player_id: str) -> AsyncGenerator[bytes, None]:
         """Return the custom audio stream for this source.
