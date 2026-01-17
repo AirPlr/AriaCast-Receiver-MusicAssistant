@@ -1,7 +1,7 @@
 # AriaCast Receiver for Music Assistant
 
 Stream audio wirelessly from your Android device to Music Assistant players. Think of it as **AirPlay for Music Assistant** - cast audio from any android phone to any speaker.<br><br>
-&nbsp;&nbsp;&nbsp;&nbsp;
+
 <img src="https://github.com/user-attachments/assets/8ba869cf-5ee8-4021-90d7-30ad6da3e065" width="45%" />
 &nbsp;&nbsp;&nbsp;&nbsp;
 <img src="https://github.com/user-attachments/assets/f5a4f1a0-b8b7-41d0-954f-9fd08c66cd5c" width="45%" /><br>
