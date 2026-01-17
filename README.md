@@ -8,7 +8,6 @@ Stream audio wirelessly from your Android device to Music Assistant players. Thi
 - 📱 **Easy Discovery**: Automatic server detection via UDP broadcast
 - 🎼 **Full Metadata**: Track title, artist, album, and artwork support
 - 🔀 **Flexible Routing**: Stream to any Music Assistant player or group
-- ⚡ **Low Latency**: 20ms frame duration with intelligent buffering
 
 ## Quick Start
 
