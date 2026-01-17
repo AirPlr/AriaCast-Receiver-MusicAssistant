@@ -90,10 +90,6 @@ git clone https://github.com/AirPlr/AriaCast-Receiver-MusicAssistant.git ariacas
 2. Check Music Assistant logs: `grep -i metadata`
 3. Verify artwork URL is accessible
 
-## Documentation
-
-- **METADATA_GUIDE.md**: Complete metadata API documentation
-- **ANDROID_TEST_INSTRUCTIONS.md**: Testing guide for Android app
 
 ## Architecture
 
