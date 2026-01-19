@@ -4,7 +4,8 @@ Stream audio wirelessly from your Android device to Music Assistant players. Thi
 
 <img src="https://github.com/user-attachments/assets/8ba869cf-5ee8-4021-90d7-30ad6da3e065" width="45%" />
 &nbsp;&nbsp;&nbsp;&nbsp;
-<img src="https://github.com/user-attachments/assets/f5a4f1a0-b8b7-41d0-954f-9fd08c66cd5c" width="45%" /><br>
+<img src="https://github.com/user-attachments/assets/cd89d6e2-bab5-4a36-bdc4-d226d7a3ce71" width="45%" /><br>
+
 ## Features
 
 - 🎵 **High-Quality Audio**: 48kHz 16-bit stereo PCM streaming
