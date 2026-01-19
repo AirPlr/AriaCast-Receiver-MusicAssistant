@@ -26,6 +26,19 @@ class MetadataHandler:
         Args:
             metadata: Dictionary containing metadata updates
         """
+        # Map common camelCase keys to snake_case
+        key_mapping = {
+            "durationMs": "duration_ms",
+            "positionMs": "position_ms",
+            "artworkUrl": "artwork_url",
+            "isPlaying": "is_playing"
+        }
+        
+        # Merge mapped keys into metadata (preferring existing snake_case if present)
+        for camel, snake in key_mapping.items():
+            if camel in metadata and snake not in metadata:
+                metadata[snake] = metadata[camel]
+
         for key in ["title", "artist", "album", "artwork_url", "duration_ms", "position_ms", "is_playing"]:
             if key in metadata and metadata[key] is not None:
                 self.current_metadata[key] = metadata[key]
