@@ -21,7 +21,7 @@ Stream audio wirelessly from your Android device to Music Assistant players. Thi
 
 ### Installation
 
-The AriaCast Receiver is included as a plugin in Music Assistant. Enable it from the Plugins section.
+Clone this repository in the providers folder of your Music Assistant instance
 
 ### Configuration
 
