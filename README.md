@@ -15,7 +15,6 @@ Stream audio wirelessly from your Android device to Music Assistant players. Thi
 - 🎼 **Full Metadata**: Track title, artist, album, artwork, duration, and position
 - 🎮 **Remote Control**: Play, pause, next, previous commands from Music Assistant UI
 - 🔀 **Flexible Routing**: Stream to any Music Assistant player or group
-- ⚡ **Low Latency**: 20ms frame duration with 300ms prebuffer
 
 ## Quick Start
 
