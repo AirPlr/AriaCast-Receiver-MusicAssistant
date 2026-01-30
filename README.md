@@ -1,5 +1,7 @@
 # AriaCast Receiver for Music Assistant
 
+![Python](https://img.shields.io/badge/python-3670A0?style=for-the-badge&logo=python&logoColor=ffdd54) ![Android](https://img.shields.io/badge/Android-3DDC84?style=for-the-badge&logo=android&logoColor=white)
+
 Stream audio wirelessly from your Android device to Music Assistant players. Think of it as **AirPlay for Android** - cast audio from any app on your phone to any speaker connected to Music Assistant.<br><br>
 
 <img src="https://github.com/user-attachments/assets/8ba869cf-5ee8-4021-90d7-30ad6da3e065" width="45%" />
@@ -177,7 +179,6 @@ Clone this repository in the providers folder of your Music Assistant instance
 1. Ensure both devices are on the same network
 2. Check firewall allows UDP port 12888 and TCP port 12889
 3. Verify Music Assistant is running with the plugin enabled
-4. Try manual connection with IP address
 
 ### No audio playback
 1. Check a Music Assistant player is available
@@ -185,16 +186,9 @@ Clone this repository in the providers folder of your Music Assistant instance
 3. Check Music Assistant logs for errors
 4. Ensure audio frames are exactly 3840 bytes
 
-### Audio pops or clicks
-1. Increase the prebuffer value in the source code
-2. Check network stability
-3. Ensure the app is sending continuous audio frames
-
 ### Metadata not showing
-1. Verify the app is sending POST requests to `/metadata`
-2. Check the JSON format matches the expected structure
-3. Ensure `serverHost` is not null in the app when calling `sendMetadata()`
-4. Check Music Assistant logs for metadata-related messages
+1. Verify the app is sending POST requests to `/metadata` in the settings
+2. Check Music Assistant logs for metadata-related messages
 
 ### Control commands not working
 1. Verify the `/control` WebSocket connection is established
