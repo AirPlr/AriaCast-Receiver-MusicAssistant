@@ -85,9 +85,9 @@ async def get_config_entries(
             description="The player to route AriaCast audio to.",
             default_value=PLAYER_ID_AUTO,
             options=[
-                ConfigValueOption(PLAYER_ID_AUTO, title="Auto (prefer playing player)"),
+                ConfigValueOption(title="Auto (prefer playing player)", value=PLAYER_ID_AUTO),
                 *(
-                    ConfigValueOption(p.player_id, title=p.display_name)
+                    ConfigValueOption(title=p.display_name, value=p.player_id)
                     for p in sorted(
                         mass.players.all_players(False, False),
                         key=lambda p: p.display_name.lower(),
