@@ -50,13 +50,14 @@ Download the [AriaCast app](https://github.com/AriaCast/AriaCast-app) and instal
 │  (AriaCast App)  │                                      │  (This Plugin)      │
 └──────────────────┘                                      └─────────────────────┘
          │                                                          │
-         │   WS /audio   — 3840-byte PCM frames →                  │
-         │   WS /control ← {"action": "play"/"pause"/…}            │
+         │   WS /audio    — 3840-byte PCM frames →                 │
+         │   WS /control  ↔ {"action"/"command": "play"/"pause"/…} │
          │   WS /metadata ← live track info broadcasts             │
+         │   WS /stats    ← buffer/frame stats, once per second    │
          │   POST /metadata → track info from sender               │
 ```
 
-The plugin implements the [AriaCast v1.1 protocol](https://github.com/AriaCast/AriaCast-Protocol-Spec) natively in Python — no external binary required.
+The plugin implements the [AriaCast v1.1 protocol](https://github.com/AriaCast/AriaCast-Protocol-Spec) natively in Python — no external binary required. `/control` is bidirectional: Music Assistant pushes playback commands to the sender, and the sender can push commands (including volume) back.
 
 ---
 
@@ -76,9 +77,10 @@ The plugin implements the [AriaCast v1.1 protocol](https://github.com/AriaCast/A
 | Endpoint | Type | Port | Purpose |
 |----------|------|------|---------|
 | UDP broadcast | Datagram | 12888 | Server discovery |
-| `GET /audio` | WebSocket | 12889 | PCM audio stream |
-| `GET /control` | WebSocket | 12889 | Playback commands to sender |
+| `GET /audio` | WebSocket | 12889 | PCM audio stream (single sender at a time) |
+| `GET /control` | WebSocket | 12889 | Bidirectional playback + volume commands |
 | `GET /metadata` | WebSocket | 12889 | Metadata subscription |
+| `GET /stats` | WebSocket | 12889 | Buffer/frame statistics, pushed every second |
 | `POST /metadata` | HTTP | 12889 | Metadata push from sender |
 | `POST /api/command` | HTTP | 12889 | External command (MA / web UI) |
 | `GET /artwork` | HTTP | 12889 | Cached artwork image |
@@ -95,6 +97,7 @@ The plugin implements the [AriaCast v1.1 protocol](https://github.com/AriaCast/A
 **No audio playback**
 - Make sure at least one MA player is available and not exclusively in use.
 - Check MA logs (`Settings → Logging`) for errors from `ariacast_receiver`.
+- Only one Android device can stream at a time. A second connection attempt is rejected (HTTP 403) until the first one disconnects.
 
 **Audio stutters**
 - Check Wi-Fi signal strength on the Android device.

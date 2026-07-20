@@ -7,6 +7,6 @@
   "codeowners": ["@music-assistant"],
   "credits": ["AirPlr"],
   "documentation": "https://github.com/AirPlr/AriaCast-Receiver-MusicAssistant/",
-  "multi_instance": true,
+  "multi_instance": false,
   "requirements": ["aiohttp"]
 }
