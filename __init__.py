@@ -10,7 +10,6 @@ import time
 from collections.abc import AsyncGenerator
 from contextlib import suppress
 from typing import TYPE_CHECKING, Any
-from uuid import uuid4
 
 import aiohttp
 from aiohttp import ClientTimeout, web
@@ -86,9 +85,9 @@ async def get_config_entries(
             description="The player to route AriaCast audio to.",
             default_value=PLAYER_ID_AUTO,
             options=[
-                ConfigValueOption(PLAYER_ID_AUTO, title="Auto (prefer playing player)"),
+                ConfigValueOption(title="Auto (prefer playing player)", value=PLAYER_ID_AUTO),
                 *(
-                    ConfigValueOption(p.player_id, title=p.display_name)
+                    ConfigValueOption(title=p.display_name, value=p.player_id)
                     for p in sorted(
                         mass.players.all_players(False, False),
                         key=lambda p: p.display_name.lower(),
@@ -129,11 +128,18 @@ class AriaCastReceiver(PluginProvider):
         self._audio_queue: asyncio.Queue[bytes] = asyncio.Queue(maxsize=100)
 
         # AriaCast protocol state
+        self._audio_sender_ws: web.WebSocketResponse | None = None
         self._control_senders: set[web.WebSocketResponse] = set()
         self._meta_sockets: set[web.WebSocketResponse] = set()
+        self._stats_sockets: set[web.WebSocketResponse] = set()
         self._artwork_bytes: bytes | None = None
         self._last_artwork_url: str | None = None
         self._is_playing: bool = False
+
+        # /stats counters (spec: transport.md "GET /stats")
+        self._stats_received_frames: int = 0
+        self._stats_overruns: int = 0
+        self._stats_task: asyncio.Task | None = None
 
         # MA stream-routing state
         self._active_player_id: str | None = None
@@ -184,6 +190,7 @@ class AriaCastReceiver(PluginProvider):
         app.router.add_get("/audio", self._ws_audio)
         app.router.add_get("/control", self._ws_control)
         app.router.add_get("/metadata", self._ws_metadata)
+        app.router.add_get("/stats", self._ws_stats)
         app.router.add_post("/metadata", self._http_metadata)
         app.router.add_post("/api/command", self._http_command)
         app.router.add_get("/image/artwork", self._http_artwork)
@@ -203,17 +210,25 @@ class AriaCastReceiver(PluginProvider):
 
         self.logger.info("AriaCast server listening on port %d", ARIACAST_PORT)
         self.mass.create_task(self._run_udp_discovery())
+        self._stats_task = self.mass.create_task(self._run_stats_broadcast())
 
     async def unload(self, is_removed: bool = False) -> None:
         """Tear down the server and close all connections."""
         # Close client sockets first, but never let a failure here prevent the
         # critical server/port teardown below (otherwise the port stays bound
         # and the next load fails with "address already in use").
-        for ws in [*self._control_senders, *self._meta_sockets]:
+        if self._stats_task:
+            self._stats_task.cancel()
+            with suppress(Exception):
+                await self._stats_task
+            self._stats_task = None
+        for ws in [*self._control_senders, *self._meta_sockets, *self._stats_sockets]:
             with suppress(Exception):
                 await ws.close()
         self._control_senders.clear()
         self._meta_sockets.clear()
+        self._stats_sockets.clear()
+        self._audio_sender_ws = None
         if self._discovery_transport:
             with suppress(Exception):
                 self._discovery_transport.close()
@@ -343,8 +358,18 @@ class AriaCastReceiver(PluginProvider):
 
     async def _ws_audio(self, request: web.Request) -> web.WebSocketResponse:
         """Receive raw PCM frames from the AriaCast sender."""
+        # Spec (transport.md): only one audio Sender at a time. A second
+        # connection attempt while one is active is rejected with HTTP 403.
+        if self._audio_sender_ws is not None:
+            self.logger.warning(
+                "Rejecting second /audio sender from %s — one is already streaming",
+                request.remote,
+            )
+            raise web.HTTPForbidden(text="An AriaCast sender is already connected")
+
         ws = web.WebSocketResponse()
         await ws.prepare(request)
+        self._audio_sender_ws = ws
 
         # Protocol handshake
         await ws.send_json({
@@ -355,23 +380,35 @@ class AriaCastReceiver(PluginProvider):
         })
         self.logger.info("AriaCast sender connected from %s", request.remote)
 
-        async for msg in ws:
-            if msg.type == aiohttp.WSMsgType.BINARY:
-                if len(msg.data) == FRAME_SIZE:
-                    try:
-                        self._audio_queue.put_nowait(msg.data)
-                    except asyncio.QueueFull:
-                        # Drop the oldest frame to make room for the new one
-                        with suppress(asyncio.QueueEmpty):
-                            self._audio_queue.get_nowait()
-                        with suppress(asyncio.QueueFull):
+        try:
+            async for msg in ws:
+                if msg.type == aiohttp.WSMsgType.BINARY:
+                    if len(msg.data) == FRAME_SIZE:
+                        self._stats_received_frames += 1
+                        try:
                             self._audio_queue.put_nowait(msg.data)
-            elif msg.type in (
-                aiohttp.WSMsgType.ERROR,
-                aiohttp.WSMsgType.CLOSING,
-                aiohttp.WSMsgType.CLOSED,
-            ):
-                break
+                        except asyncio.QueueFull:
+                            # Drop the oldest frame to make room for the new one
+                            self._stats_overruns += 1
+                            with suppress(asyncio.QueueEmpty):
+                                self._audio_queue.get_nowait()
+                            with suppress(asyncio.QueueFull):
+                                self._audio_queue.put_nowait(msg.data)
+                    else:
+                        self.logger.warning(
+                            "Dropping /audio frame with unexpected size %d (expected %d)",
+                            len(msg.data),
+                            FRAME_SIZE,
+                        )
+                elif msg.type in (
+                    aiohttp.WSMsgType.ERROR,
+                    aiohttp.WSMsgType.CLOSING,
+                    aiohttp.WSMsgType.CLOSED,
+                ):
+                    break
+        finally:
+            if self._audio_sender_ws is ws:
+                self._audio_sender_ws = None
 
         self.logger.info("AriaCast sender disconnected from %s", request.remote)
         # If we were the active stream, mark as not playing so get_audio_stream can exit cleanly
@@ -381,22 +418,138 @@ class AriaCastReceiver(PluginProvider):
         return ws
 
     async def _ws_control(self, request: web.Request) -> web.WebSocketResponse:
-        """Register a sender for command delivery."""
+        """Register a sender for command delivery and accept inbound commands."""
         ws = web.WebSocketResponse()
         await ws.prepare(request)
         self._control_senders.add(ws)
         self.logger.info("Control client connected from %s", request.remote)
 
+        # Spec (transport.md): the Python server sends an initial status frame
+        # on /control (unlike the Go server, which sends nothing here).
+        current_volume = self._get_current_volume()
+        await ws.send_json({
+            "status": "READY",
+            "volume_available": current_volume is not None,
+            "current_volume": current_volume if current_volume is not None else -1,
+        })
+
         try:
             async for msg in ws:
-                # Per spec the Go server only sends to /control clients, never reads.
-                # We follow the same model: forward only.
-                if msg.type in (aiohttp.WSMsgType.ERROR, aiohttp.WSMsgType.CLOSING):
+                if msg.type == aiohttp.WSMsgType.TEXT:
+                    with suppress(Exception):
+                        payload = json.loads(msg.data)
+                        await self._handle_inbound_control(ws, payload)
+                elif msg.type in (aiohttp.WSMsgType.ERROR, aiohttp.WSMsgType.CLOSING):
                     break
         finally:
             self._control_senders.discard(ws)
 
         return ws
+
+    async def _handle_inbound_control(
+        self, ws: web.WebSocketResponse, payload: dict[str, Any]
+    ) -> None:
+        """
+        Process a command-keyed or action-keyed message sent by a /control client.
+
+        Per control.md, the Python server (unlike the Go server) accepts both
+        ``{"command": ...}`` and ``{"action": ...}`` messages from senders and
+        replies with an ack in the same key style.
+        """
+        key = "command" if "command" in payload else "action" if "action" in payload else None
+        if key is None:
+            return
+        command = str(payload.get(key) or "").lower()
+        if not command:
+            return
+
+        if command in ("volume", "volume_set"):
+            await self._handle_volume_command(ws, command, payload)
+            return
+
+        reply: dict[str, Any] = {key: command, "success": True}
+
+        if command == "play":
+            await self._cmd_play()
+        elif command == "pause":
+            await self._cmd_pause()
+        elif command in ("play_pause", "toggle"):
+            if self._is_playing:
+                await self._cmd_pause()
+            else:
+                await self._cmd_play()
+        elif command == "stop":
+            await self._cmd_pause()
+        elif command == "next":
+            if self._active_player_id:
+                with suppress(Exception):
+                    await self.mass.player_queues.next(self._active_player_id)
+        elif command == "previous":
+            if self._active_player_id:
+                with suppress(Exception):
+                    await self.mass.player_queues.previous(self._active_player_id)
+        elif command == "seek":
+            # The live AriaCast source has no seekable timeline on the MA side
+            # (audio_source.can_seek is False); accept and ack per spec, no-op.
+            position = payload.get("position_ms", payload.get("value"))
+            reply["position_ms"] = position
+        else:
+            self.logger.debug("Unknown /control %s: %r", key, command)
+            reply["success"] = False
+
+        with suppress(Exception):
+            await ws.send_json(reply)
+
+    def _get_current_volume(self) -> int | None:
+        """Return the current volume (0-100) of the active MA player, if known."""
+        player_id = self._active_player_id or self._get_target_player_id()
+        if not player_id:
+            return None
+        player = self.mass.players.get_player(player_id)
+        if not player or player.state.volume_level is None:
+            return None
+        return int(player.state.volume_level)
+
+    async def _handle_volume_command(
+        self, ws: web.WebSocketResponse, command: str, payload: dict[str, Any]
+    ) -> None:
+        """Handle a volume/volume_set command per control.md."""
+        player_id = self._active_player_id or self._get_target_player_id()
+        player = self.mass.players.get_player(player_id) if player_id else None
+
+        if not player or player.state.volume_level is None:
+            with suppress(Exception):
+                await ws.send_json({"command": "volume", "level": -1, "success": False})
+            return
+
+        try:
+            if command == "volume_set":
+                level = payload.get("level")
+                if level is not None:
+                    await self.mass.players.cmd_volume_set(player_id, int(level))
+            else:
+                direction = payload.get("direction")
+                value = payload.get("value")
+                if direction == "up":
+                    await self.mass.players.cmd_volume_up(player_id)
+                elif direction == "down":
+                    await self.mass.players.cmd_volume_down(player_id)
+                elif direction == "get":
+                    pass
+                elif value is not None:
+                    await self.mass.players.cmd_volume_set(player_id, int(value))
+        except Exception as exc:
+            self.logger.debug("Volume command failed: %s", exc)
+            with suppress(Exception):
+                await ws.send_json({"command": "volume", "level": -1, "success": False})
+            return
+
+        # Re-fetch the resulting level after the command was applied.
+        player = self.mass.players.get_player(player_id)
+        vol = player.state.volume_level if player else None
+        level = int(vol) if vol is not None else -1
+        with suppress(Exception):
+            await ws.send_json({"command": "volume", "level": level, "success": level != -1})
 
     async def _ws_metadata(self, request: web.Request) -> web.WebSocketResponse:
         """Stream metadata updates to subscribers."""
@@ -427,6 +580,54 @@ class AriaCastReceiver(PluginProvider):
             self._meta_sockets.discard(ws)
 
         return ws
+
+    async def _ws_stats(self, request: web.Request) -> web.WebSocketResponse:
+        """GET /stats — subscribe to periodic buffer/playback statistics."""
+        ws = web.WebSocketResponse()
+        await ws.prepare(request)
+        self._stats_sockets.add(ws)
+        self.logger.debug("Stats client connected from %s", request.remote)
+
+        with suppress(Exception):
+            await ws.send_json(self._stats_dict())
+
+        try:
+            async for msg in ws:
+                if msg.type in (aiohttp.WSMsgType.ERROR, aiohttp.WSMsgType.CLOSING):
+                    break
+        finally:
+            self._stats_sockets.discard(ws)
+
+        return ws
+
+    def _stats_dict(self) -> dict[str, Any]:
+        """Serialise current buffer/playback statistics per transport.md."""
+        queued = self._audio_queue.qsize()
+        capacity = self._audio_queue.maxsize or 1
+        return {
+            "receivedFrames": self._stats_received_frames,
+            "playedCallbacks": self._stats_received_frames,
+            "underruns": 0,
+            "overruns": self._stats_overruns,
+            "queuedFrames": queued,
+            "bufferLevel": f"{(queued / capacity) * 100:.1f}%",
+        }
+
+    async def _run_stats_broadcast(self) -> None:
+        """Push stats to all /stats subscribers every second (spec: transport.md)."""
+        with suppress(asyncio.CancelledError):
+            while True:
+                await asyncio.sleep(1)
+                if not self._stats_sockets:
+                    continue
+                msg = self._stats_dict()
+                dead: set[web.WebSocketResponse] = set()
+                for ws in list(self._stats_sockets):
+                    try:
+                        await ws.send_json(msg)
+                    except Exception:
+                        dead.add(ws)
+                self._stats_sockets -= dead
 
     # -----------------------------------------------------------------------
     # AriaCast protocol — HTTP handlers
@@ -679,7 +880,9 @@ class AriaCastReceiver(PluginProvider):
             self._discovery_transport = transport
             self.logger.info("UDP discovery active on port %d", DISCOVERY_PORT)
         except Exception as exc:
-            self.logger.warning("UDP discovery unavailable (port %d in use?): %s", DISCOVERY_PORT, exc)
+            self.logger.warning(
+                "UDP discovery unavailable (port %d in use?): %s", DISCOVERY_PORT, exc
+            )
 
     @staticmethod
     def _get_local_ip() -> str:
@@ -704,11 +907,19 @@ class AriaCastReceiver(PluginProvider):
         if self._default_player_id == PLAYER_ID_AUTO:
             for player in self.mass.players.all_players(False, False):
                 if player.state.playback_state == PlaybackState.PLAYING:
-                    self.logger.debug("Auto-selected playing player: %s (%s)", player.display_name, player.player_id)
+                    self.logger.debug(
+                        "Auto-selected playing player: %s (%s)",
+                        player.display_name,
+                        player.player_id,
+                    )
                     return player.player_id
             players = list(self.mass.players.all_players(False, False))
             if players:
-                self.logger.debug("Auto-selected first player: %s (%s)", players[0].display_name, players[0].player_id)
+                self.logger.debug(
+                    "Auto-selected first player: %s (%s)",
+                    players[0].display_name,
+                    players[0].player_id,
+                )
                 return players[0].player_id
             self.logger.warning("No MA players available to route AriaCast audio")
             return None
